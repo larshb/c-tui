@@ -1,0 +1,7 @@
+This is a dummy popup.
+
+It should render within the current context.
+
+Hope it works! :)
+
+Press any key to continue...
