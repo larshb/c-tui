@@ -1,30 +1,20 @@
 #include <stdio.h>
 #include <stdlib.h>
 #include <stdbool.h>
-#include <unistd.h>
 #include <signal.h>
-#include <termios.h>
 #include <pthread.h>
 #include <sys/ioctl.h>
+#include <ctype.h>
 
 #include "ansi.h"
+#include "terminal.h"
 
+static volatile bool inFocus = true;
 static volatile bool keepRunning = true;
 
-struct termios termios_keep;
+char exitReason[128] = "";
 
-void termios_disableRawMode()
-{
-    tcsetattr(STDIN_FILENO, TCSAFLUSH, &termios_keep);
-}
 
-void termios_enableRawMode()
-{
-    tcgetattr(STDIN_FILENO, &termios_keep);
-    struct termios raw = termios_keep;
-    raw.c_lflag &= ~(ECHO | ICANON);
-    tcsetattr(STDIN_FILENO, TCSANOW, &raw);
-}
 
 void intHandler(int dummy) {
     keepRunning = 0;
@@ -32,8 +22,11 @@ void intHandler(int dummy) {
 
 enum keypress {
     KP_UNDEF,
+    KP_IGNORE,
     KP_CHAR,
-    KP_ARROW
+    KP_ARROW,
+    KP_FOCUS,
+    KP_CLICK
 };
 
 enum kp_arrow {
@@ -45,6 +38,12 @@ enum kp_arrow {
 
 char * kp_arrow[] = {"UP", "DOWN", "RIGHT", "LEFT"};
 
+struct termpos {
+    unsigned char row;
+    unsigned char col;
+};
+struct termpos termpos;
+
 int get_keypress(enum keypress * kp, char * cp)
 {
     *kp = KP_UNDEF;
@@ -55,8 +54,25 @@ int get_keypress(enum keypress * kp, char * cp)
         if (*cp == '[')
         {
             *cp = getchar();
-            if ('A' <= *cp && *cp <= 'D') *kp = KP_ARROW;
-            return 1;
+            switch (*cp)
+            {
+                case 'A':
+                case 'B':
+                case 'C':
+                case 'D':
+                    *kp = KP_ARROW;
+                    return 1;
+                case 'I':
+                case 'O':
+                    *kp = KP_FOCUS;
+                    return 1;
+                case 'M':
+                    *cp = getchar();
+                    *kp = (*cp == ' ') ? KP_CLICK : KP_IGNORE; // Mouse click ('#'=release)
+                    termpos.col = getchar() - 33;
+                    termpos.row = getchar() - 33;
+                    return 1;
+            }
         }
     }
     else if (('a' <= *cp && *cp <= 'z') || ('A' <= *cp && *cp <= 'Z'))
@@ -130,9 +146,11 @@ void setup()
     
     say(
         CSI "?1049h" // Enable alternative buffer
-        CSI "2J"     // Clear entire screen
-        CSI "H"      // Position cursor top left
+        CSI "?1000h" // Detect mouse pointer
+        CSI "?1004h" // Detect focus
         CSI "?25l"   // Hide cursor
+        CSI "H"      // Position cursor top left
+        CSI "2J"     // Clear entire screen
     );
 }
 
@@ -140,8 +158,10 @@ void cleanup()
 {
     termios_disableRawMode();
     say(
-        CSI "?1049l" // Enable alternative buffer
+        CSI "?1049l" // Disable alternative buffer
         CSI "?25h"   // Show cursor
+        CSI "?1000l" // Undetect mouse pointer
+        CSI "?1004l" // Undetect focus
     );
 }
 
@@ -248,17 +268,18 @@ void tui()
     bool redraw = true;
     bool popup = true;
     struct winsize w, w_prev;
+    char msg[128] = {0};
 
     // Set up help-menu
     const struct {
         char key[10];
         char desc[128];
     } help[] = {
-        {"X", "Exit"},
-        {"A", "Right"},
-        {"D", "Left"},
-        {"↑", "Increment"},
-        {"↓", "Decrement"}
+        {"X", "E[x]it"},
+        {"A", "Right[a]"},
+        {"D", "Left[d]"},
+        {"↑", "Increment[↑]"},
+        {"↓", "Decrement[↓]"}
         /*,
         {'Q', "Menu left"},
         {'E', "Menu right"}*/
@@ -299,7 +320,11 @@ void tui()
     {
         // Get terminal dimensions
         ioctl(STDOUT_FILENO, TIOCGWINSZ, &w);
-        if (w_prev.ws_col != w.ws_col || w_prev.ws_row != w.ws_row) redraw = true;
+        if (w_prev.ws_col != w.ws_col || w_prev.ws_row != w.ws_row)
+        {
+            redraw = true;
+            sprintf(msg, "[%d, %d]", w.ws_row, w.ws_col);
+        }
         w_prev.ws_col = w.ws_col;
         w_prev.ws_row = w.ws_row;
 
@@ -310,39 +335,46 @@ void tui()
             redraw = false;
 
             knobs_position(w.ws_row, w.ws_col, 1, knobs, N_KNOBS);
-            knobs_position(w.ws_row, w.ws_col, 1+w.ws_row/2, gauge, N_KNOBS);
+            // knobs_position(w.ws_row, w.ws_col, 1+w.ws_row/2, gauge, N_KNOBS);
 
-            // Draw frame
+            position_cursor(w.ws_row-2, w.ws_col-2);
             say(
                 CSI "2J"  // Clear screen
                 CSI "H"   // Cursor top left
             );
-            printf("┌");
-            for (i = 0; i < w.ws_col-2; i++) printf("─");
-            printf("┐");
-            for (i = 1; i < w.ws_row-1; i++)
+
+            if (inFocus)
             {
-                position_cursor(i, 0); printf("│");
-                position_cursor(i, w.ws_col); printf("│");
+                // Draw outer frame
+                position_cursor(0, 0);
+                printf("┌");
+                for (i = 0; i < w.ws_col-2; i++) printf("─");
+                printf("┐");
+                for (i = 1; i < w.ws_row-1; i++)
+                {
+                    position_cursor(i, 0); printf("│");
+                    position_cursor(i, w.ws_col); printf("│");
+                }
+                position_cursor(w.ws_row, 0);
+                printf("└");
+                for (i = 0; i < w.ws_col-2; i++) printf("─");
+                printf("┘");
+
+                // Print title
+                position_cursor(0, 2);
+                printf("%s", TITLE);
             }
-            position_cursor(w.ws_row, 0);
-            printf("└");
-            for (i = 0; i < w.ws_col-2; i++) printf("─");
-            printf("┘");
 
-            // Print title
-            position_cursor(0, 2);
-            printf("%s", TITLE);
-
-            // Divider
-            position_cursor(w.ws_row / 2, 0);
-            printf("├");
-            for (i = 0; i < w.ws_col-2; i++) printf("─");
-            printf("┤");
-            position_cursor(w.ws_row / 2, 2);
-            printf("{divider text}");
+            // // Divider
+            // position_cursor(w.ws_row / 2, 0);
+            // printf("├");
+            // for (i = 0; i < w.ws_col-2; i++) printf("─");
+            // printf("┤");
+            // position_cursor(w.ws_row / 2, 2);
+            // printf("{divider text}");
 
             // Print help
+            #if 0 // Inside frame
             position_cursor(w.ws_row-3, 0);
             printf("├");
             for (i = 0; i < w.ws_col-2; i++) printf("─");
@@ -352,28 +384,40 @@ void tui()
             {
                 printf(" " CSI "7m %s " CSI "0m" " %s", help[i].key, help[i].desc);
             }
+            #else // on top of frame
+            position_cursor(w.ws_row-1, 2);
+            for (i = 0; i < sizeof(help) / sizeof(*help); i++)
+            {
+                // printf(" ");
+                printf("%s", help[i].desc);
+                // printf(" ");
+                // printf("[%s]", help[i].key);
+                // printf(" ");
+                printf(CSI "C"); // Cursor forward
+            }
+            #endif
 
             // Print knobs
             for (i = 0; i < N_KNOBS; i++)
             {
                 knob_t * k_p = &knobs[i];
                 position_cursor(k_p->r, k_p->c);
-                if (i == knob_sel) printf(CSI "7m");
+                if (i == knob_sel && inFocus) printf(CSI "7m");
                 printf("%*d", k_p->width, knob_update(k_p));
                 position_cursor(k_p->r+1, k_p->c);
                 printf(CSI "0;2m" "%*s" CSI "0m", k_p->width, k_p->desc);
             }
         }
 
-        // Print gauges
-        for (i = 0; i < N_KNOBS; i++)
-        {
-            knob_t * g_p = &gauge[i];
-            position_cursor(g_p->r, g_p->c);
-            printf("%*d", g_p->width, knob_update(g_p));
-            position_cursor(g_p->r+1, g_p->c);
-            printf(CSI "0;2m" "%*s" CSI "0m", g_p->width, g_p->desc);
-        }
+        // // Print gauges
+        // for (i = 0; i < N_KNOBS; i++)
+        // {
+        //     knob_t * g_p = &gauge[i];
+        //     position_cursor(g_p->r, g_p->c);
+        //     printf("%*d", g_p->width, knob_update(g_p));
+        //     position_cursor(g_p->r+1, g_p->c);
+        //     printf(CSI "0;2m" "%*s" CSI "0m", g_p->width, g_p->desc);
+        // }
 
         if (popup)
         {
@@ -436,21 +480,22 @@ void tui()
                 redraw = true;
             }
             knob_t * k_p = &knobs[knob_sel];
-            if (kbd->kp == KP_CHAR && kbd->c == 'x')
+            if (kbd->kp == KP_CHAR)
             {
-                keepRunning = false;
-            }
-            else if (kbd->kp == KP_CHAR && kbd->c == 'a') // select left
-            {
-                knob_sel -= 1;
-                if (knob_sel < 0) knob_sel += N_KNOBS;
-                redraw = true;
-            }
-            else if (kbd->kp == KP_CHAR && kbd->c == 'd') // select right
-            {
-                knob_sel += 1;
-                knob_sel %= N_KNOBS;
-                redraw = true;
+                switch (tolower(kbd->c))
+                {
+                    case 'x': keepRunning = false; break;
+                    case 'a':
+                        knob_sel -= 1;
+                        if (knob_sel < 0) knob_sel += N_KNOBS;
+                        redraw = true;
+                        break;
+                    case 'd':
+                        knob_sel += 1;
+                        knob_sel %= N_KNOBS;
+                        redraw = true;
+                        break;
+                }
             }
             else if (kbd->kp == KP_ARROW && kbd->c == 'A') // up:increase
             {
@@ -462,28 +507,45 @@ void tui()
                 k_p->set(k_p->id, knob_update(k_p) - 1);
                 redraw = true;
             }
-            else
+            else if (kbd->kp == KP_FOCUS)
             {
-                char string[128] = {0};
-                sprintf(string, "Unknown option %c [%d:%d]", kbd->c, kbd->kp, kbd->c);
-                int temp_col = w.ws_col/2 - strlen(string)/2;
-                if (0 <= temp_col)
-                {
-                    position_cursor(w.ws_row / 2, temp_col);
-                    printf(CSI "41m" "%s" CSI "0m", string);
-                    fflush(stdout);
-                    usleep(500*1000);
-                    redraw = true;
-                }
-                else
-                {
-                    keepRunning = false;
-                }
+                inFocus = (kbd->c == 'I');
+                sprintf(msg, "Focus changed to %s", inFocus?"in":"out");
+                redraw = true;
             }
+            else if (kbd->kp == KP_CLICK)
+            {
+                position_cursor(termpos.row, termpos.col);
+                printf("✗");
+                fflush(stdout);
+            }
+            else if (kbd->kp != KP_IGNORE)
+            {
+                sprintf(msg, "Unknown option %c [%d:%d]", kbd->c, kbd->kp, kbd->c);
+            }
+            
         }
         else
         {
-            usleep(200*1000);
+            usleep(10*1000);
+        }
+        if (*msg != 0)
+        {
+            int temp_col = w.ws_col/2 - strlen(msg)/2;
+            if (0 <= temp_col)
+            {
+                position_cursor(w.ws_row / 2, temp_col);
+                printf(CSI "41m" "%s" CSI "0m", msg);
+                memset(&msg, 0, sizeof(msg) / sizeof(*msg));
+                // fflush(stdout);
+                usleep(500*1000);
+                redraw = true;
+            }
+            else
+            {
+                keepRunning = false;
+                sprintf(exitReason, "Terminal window too narrow");
+            }
         }
     }
 }
@@ -493,6 +555,7 @@ int main(int argc, char *argv[]) {
     tui();
     // pthread_join(thread, NULL);
     cleanup();
+    if (*exitReason != 0) printf("%s\n", exitReason);
     // puts("Goodbye!");
     return 0;
 }
