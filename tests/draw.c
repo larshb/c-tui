@@ -2,7 +2,6 @@
 #include <stdio.h>
 #include <unistd.h>
 
-#include "../ansi.h"
 #include "../terminal.h"
 
 #define BRUSH "▒"

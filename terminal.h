@@ -3,6 +3,12 @@
 
 #include <unistd.h>
 #include <termios.h>
+#include <string.h>
+
+#define ESC "\e"
+#define CSI ESC "["
+
+#define say(s) write(STDOUT_FILENO, s, strlen(s));
 
 struct termios termios_keep;
 

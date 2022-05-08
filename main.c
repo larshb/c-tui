@@ -6,8 +6,8 @@
 #include <sys/ioctl.h>
 #include <ctype.h>
 
-#include "ansi.h"
 #include "terminal.h"
+#include "view.h"
 
 struct termpos {
     unsigned char row;
@@ -223,7 +223,7 @@ int knob_update(knob_t * knob)
     return knob->value;
 }
 
-#define N_KNOBS 20
+#define N_KNOBS 8
 int dummy_data[N_KNOBS];
 void dummy_set(int id, int value)
 {
@@ -300,7 +300,7 @@ void tui()
         k_p->id = i;
         g_p->id = i;
         k_p->set = dummy_set;
-        g_p->set = NULL;
+        g_p->set = NULL; // Read only
         k_p->get = dummy_get;
         g_p->get = random_get;
         k_p->set(k_p->id, i);
@@ -338,7 +338,7 @@ void tui()
             redraw = false;
 
             knobs_position(w.ws_row, w.ws_col, 1, knobs, N_KNOBS);
-            // knobs_position(w.ws_row, w.ws_col, 1+w.ws_row/2, gauge, N_KNOBS);
+            knobs_position(w.ws_row, w.ws_col, 1+w.ws_row/2, gauge, N_KNOBS);
 
             position_cursor(w.ws_row-2, w.ws_col-2);
             say(
@@ -370,39 +370,27 @@ void tui()
                 // Print title
                 position_cursor(0, 2);
                 printf("%s", TITLE);
-            }
 
-            // // Divider
-            // position_cursor(w.ws_row / 2, 0);
-            // printf("├");
-            // for (i = 0; i < w.ws_col-2; i++) printf("─");
-            // printf("┤");
-            // position_cursor(w.ws_row / 2, 2);
-            // printf("{divider text}");
+                // // Divider
+                // position_cursor(w.ws_row / 2, 0);
+                // printf("├");
+                // for (i = 0; i < w.ws_col-2; i++) printf("─");
+                // printf("┤");
+                // position_cursor(w.ws_row / 2, 2);
+                // printf("{divider text}");
 
-            // Print help
-            #if 0 // Inside frame
-            position_cursor(w.ws_row-3, 0);
-            printf("├");
-            for (i = 0; i < w.ws_col-2; i++) printf("─");
-            printf("┤");
-            position_cursor(w.ws_row-2, 1);
-            for (i = 0; i < sizeof(help) / sizeof(*help); i++)
-            {
-                printf(" " CSI "7m %s " CSI "0m" " %s", help[i].key, help[i].desc);
+                // Print help
+                position_cursor(w.ws_row-1, 2);
+                for (i = 0; i < sizeof(help) / sizeof(*help); i++)
+                {
+                    // printf(" ");
+                    printf("%s", help[i].desc);
+                    // printf(" ");
+                    // printf("[%s]", help[i].key);
+                    // printf(" ");
+                    printf(CSI "C"); // Cursor forward
+                }
             }
-            #else // on top of frame
-            position_cursor(w.ws_row-1, 2);
-            for (i = 0; i < sizeof(help) / sizeof(*help); i++)
-            {
-                // printf(" ");
-                printf("%s", help[i].desc);
-                // printf(" ");
-                // printf("[%s]", help[i].key);
-                // printf(" ");
-                printf(CSI "C"); // Cursor forward
-            }
-            #endif
 
             // Print knobs
             for (i = 0; i < N_KNOBS; i++)
@@ -416,15 +404,17 @@ void tui()
             }
         }
 
-        // // Print gauges
-        // for (i = 0; i < N_KNOBS; i++)
-        // {
-        //     knob_t * g_p = &gauge[i];
-        //     position_cursor(g_p->r, g_p->c);
-        //     printf("%*d", g_p->width, knob_update(g_p));
-        //     position_cursor(g_p->r+1, g_p->c);
-        //     printf(CSI "0;2m" "%*s" CSI "0m", g_p->width, g_p->desc);
-        // }
+        // Print gauges
+        for (i = 0; i < N_KNOBS; i++)
+        {
+            knob_t * g_p = &gauge[i];
+            position_cursor(g_p->r, g_p->c);
+            printf("%*d", g_p->width, knob_update(g_p));
+            position_cursor(g_p->r+1, g_p->c);
+            printf(CSI "0;2m" "%*s" CSI "0m", g_p->width, g_p->desc);
+        }
+        fflush(stdout);
+        usleep(10*1000);
 
         if (popup)
         {

@@ -3,7 +3,6 @@
 #include <wchar.h>
 #include <locale.h>
 
-#include "../ansi.h"
 #include "../terminal.h"
 
 unsigned int offset = 0x000;
