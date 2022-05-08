@@ -1,150 +1,29 @@
 #include <stdio.h>
 #include <stdlib.h>
-#include <stdbool.h>
 #include <signal.h>
 #include <pthread.h>
 #include <sys/ioctl.h>
 #include <ctype.h>
 
 #include "terminal.h"
-#include "view.h"
+#include "knobs.h"
+#include "keypress.h"
+#include "globals.h"
 
-struct termpos {
-    unsigned char row;
-    unsigned char col;
-};
-struct termpos termpos;
-struct termpos closeBtn;
-
-static volatile bool inFocus = true;
-static volatile bool keepRunning = true;
+volatile bool TUI_keepRunning;
+volatile bool TUI_inFocus = true;
+volatile bool TUI_shrinkToFit = true;
+kbd_queue_t * kbd;
 
 char exitReason[128] = "";
 
-
-
 void intHandler(int dummy) {
-    keepRunning = 0;
-}
-
-enum keypress {
-    KP_UNDEF,
-    KP_IGNORE,
-    KP_CHAR,
-    KP_ARROW,
-    KP_FOCUS,
-    KP_CLICK
-};
-
-enum kp_arrow {
-    KP_ARROW_UP,
-    KP_ARROW_DOWN,
-    KP_ARROW_RIGHT,
-    KP_ARROW_LEFT
-};
-
-char * kp_arrow[] = {"UP", "DOWN", "RIGHT", "LEFT"};
-
-int get_keypress(enum keypress * kp, char * cp)
-{
-    *kp = KP_UNDEF;
-    *cp = getchar();
-    if (*cp == *ESC)
-    {
-        *cp = getchar();
-        if (*cp == '[')
-        {
-            *cp = getchar();
-            switch (*cp)
-            {
-                case 'A':
-                case 'B':
-                case 'C':
-                case 'D':
-                    *kp = KP_ARROW;
-                    return 1;
-                case 'I':
-                case 'O':
-                    *kp = KP_FOCUS;
-                    return 1;
-                case 'M':
-                    *cp = getchar();
-                    *kp = (*cp == ' ') ? KP_CLICK : KP_IGNORE; // Mouse click ('#'=release)
-                    termpos.col = getchar() - 33;
-                    termpos.row = getchar() - 33;
-                    return 1;
-            }
-        }
-    }
-    else if (('a' <= *cp && *cp <= 'z') || ('A' <= *cp && *cp <= 'Z'))
-    {
-        *kp = KP_CHAR;
-        return 1;
-    }
-    return 0;
-}
-
-#define KBD_BUF_SIZE 16
-typedef struct {
-    enum keypress kp;
-    char c;
-    bool consumed;
-} kbd_queue_t;
-kbd_queue_t kbd_q[KBD_BUF_SIZE];
-kbd_queue_t * kbd;
-
-bool __global_keylogger_ready = false;
-
-void * keylogger(void * args)
-{
-    int i;
-    char cp;
-    enum keypress kp;
-    kbd_queue_t * kbd;
-
-    // Reset keyboard buffer/queue
-    for (i = 0; i < KBD_BUF_SIZE; i++)
-    {
-        kbd_q[i].kp = KP_UNDEF;
-        kbd_q[i].c = 'U';
-        kbd_q[i].consumed = true;
-    }
-    i = 0;
-    __global_keylogger_ready = true;
-
-    // Record keyboard input
-    while (keepRunning && get_keypress(&kp, &cp))
-    {
-        kbd = &kbd_q[i];
-        kbd->kp = kp;
-        kbd->c = cp;
-        kbd->consumed = false;
-        i++; i%=KBD_BUF_SIZE;
-    }
-}
-
-int get_keypress_from_queue()
-{
-    static int i = 0;
-
-    kbd = &kbd_q[i];
-    if (!kbd_q[i].consumed)
-    {
-        kbd->consumed = true;
-        i++; i%=KBD_BUF_SIZE;
-        return 1;
-    }
-    return 0;
+    TUI_keepRunning = 0;
 }
 
 void setup()
 {
-    // Register signal interrupt handler
-    signal(SIGINT, intHandler);
-
-    // Setup RAW TTY
     termios_enableRawMode();
-    
     say(
         CSI "?1049h" // Enable alternative buffer
         CSI "?1000h" // Detect mouse pointer
@@ -159,72 +38,16 @@ void cleanup()
 {
     termios_disableRawMode();
     say(
-        CSI "?1049l" // Disable alternative buffer
-        CSI "?25h"   // Show cursor
         CSI "?1000l" // Undetect mouse pointer
         CSI "?1004l" // Undetect focus
+        CSI "?1049l" // Disable alternative buffer
+        CSI "?25h"   // Show cursor
     );
 }
 
 #define TITLE "{Title placeholder}"
-
-void position_cursor(int r, int c)
-{
-    printf(CSI "%d;%dH", r+1, c+1);
-}
-
-#define KNOB_DESC_SIZE 128
-typedef struct {
-    int r, c;
-    int value;
-    int width;
-    char desc[KNOB_DESC_SIZE];
-    int id;
-    int (*get)(int); // id
-    void (*set)(int, int); // id, value
-} knob_t;
-
-void knobs_position(int rows, int cols, int row_offset, knob_t * knobs, const int N_KNOBS)
-{
-    int i, r, c;
-    int desc_width, desc_width_max=0;
-    knob_t * k_p;
-
-    // Figure out max width needed for every knob
-    for (i = 0; i < N_KNOBS; i++)
-    {
-        desc_width = strlen(knobs[i].desc);
-        if (desc_width_max < desc_width)
-        {
-            desc_width_max = desc_width;
-        }
-    }
-
-    r = row_offset;
-    c = 2;
-    for (i = 0; i < N_KNOBS; i++)
-    {
-        k_p = &knobs[i];
-        k_p->width = desc_width_max;
-        if (cols < c + desc_width_max + 2)
-        {
-            r += 3;
-            c = 2;
-        }
-        k_p->r = r;
-        k_p->c = c;
-        c += desc_width_max + 1;
-    }
-}
-
-int knob_update(knob_t * knob)
-{
-    knob->value = knob->get(knob->id);
-    return knob->value;
-}
-
-#define N_KNOBS 8
-int dummy_data[N_KNOBS];
+#define N_DUMMY_KNOBS 8
+int dummy_data[N_DUMMY_KNOBS];
 void dummy_set(int id, int value)
 {
     dummy_data[id] = value;
@@ -236,6 +59,30 @@ int dummy_get(int id)
 int random_get(int id)
 {
     return rand() % 255;
+}
+void dummy_init(knob_t knobs[], const int N_KNOBS) {
+    int i;
+
+    // knob_t knobs[N_KNOBS];
+    // knob_t gauge[N_KNOBS]; // Read-only
+    for (i = 0; i < N_KNOBS; i++)
+    {
+        knob_t * k_p = &knobs[i];
+        // knob_t * g_p = &gauge[i];
+        memset(k_p->desc, 0, KNOB_DESC_SIZE);
+        // memset(g_p->desc, 0, KNOB_DESC_SIZE);
+        sprintf(k_p->desc, "DUMMY-%d", i);
+        // sprintf(g_p->desc, "ADC-%d", i);
+        k_p->id = i;
+        // g_p->id = i;
+        k_p->set = dummy_set;
+        // g_p->set = NULL; // Read only
+        k_p->get = dummy_get;
+        // g_p->get = random_get;
+        k_p->set(k_p->id, i);
+        knob_update(k_p);
+        // knob_update(g_p);
+    }
 }
 
 int file_dimensions(const char * path, ssize_t * rows, ssize_t * cols)
@@ -262,14 +109,49 @@ int file_dimensions(const char * path, ssize_t * rows, ssize_t * cols)
     return 0;
 }
 
+void printFile(const char path[])
+{
+    FILE * fp;
+    char c;
+
+    fp = fopen(path, "r");
+    if (fp == NULL)
+    {
+        printf("Cannot open file \n");
+        return;
+    }
+
+    c = fgetc(fp);
+    while (c != EOF)
+    {
+        printf("%c", c);
+        c = fgetc(fp);
+    }
+
+    fclose(fp);
+}
+
 void tui()
 {
     int i, r, c;
     pthread_t thread;
     bool redraw = true;
-    bool popup = true;
-    struct winsize w, w_prev;
+    struct winsize win_curr, win_prev;
+    struct termpos canvas, posBtnMaximize, posBtnClose;
     char msg[128] = {0};
+
+    // Setup keylogger
+    pthread_create(&thread, NULL, keylogger, NULL);
+    while (!__global_keylogger_ready)
+    {
+        usleep(10*1000);
+    }
+    
+    bool prompt=false;
+    const char prompt_label[256] = "Run in shell";
+
+    bool popup=false;
+    const char popup_path[256] = "popup.txt";
 
     // Set up help-menu
     const struct {
@@ -287,49 +169,35 @@ void tui()
     };
 
     // Set up (dummy) knobs
-    knob_t knobs[N_KNOBS];
-    knob_t gauge[N_KNOBS]; // Read-only
-    for (i = 0; i < N_KNOBS; i++)
-    {
-        knob_t * k_p = &knobs[i];
-        knob_t * g_p = &gauge[i];
-        memset(k_p->desc, 0, KNOB_DESC_SIZE);
-        memset(g_p->desc, 0, KNOB_DESC_SIZE);
-        sprintf(k_p->desc, "DAC-%d", i);
-        sprintf(g_p->desc, "ADC-%d", i);
-        k_p->id = i;
-        g_p->id = i;
-        k_p->set = dummy_set;
-        g_p->set = NULL; // Read only
-        k_p->get = dummy_get;
-        g_p->get = random_get;
-        k_p->set(k_p->id, i);
-        knob_update(k_p);
-        knob_update(g_p);
-    }
+    knob_t knobs[N_DUMMY_KNOBS];
+    dummy_init(knobs, N_DUMMY_KNOBS);
+    int knob_width = knobs_get_width(knobs, N_DUMMY_KNOBS);
+    int canvas_max_width;
     int knob_sel = 0;
 
-    pthread_create(&thread, NULL, keylogger, NULL);
-
-    while (!__global_keylogger_ready)
-    {
-        usleep(10*1000);
-    }
-
     i = 0;
-    while (keepRunning)
+    while (TUI_keepRunning)
     {
         // Get terminal dimensions
-        ioctl(STDOUT_FILENO, TIOCGWINSZ, &w);
-        if (w_prev.ws_col != w.ws_col || w_prev.ws_row != w.ws_row)
+        ioctl(STDOUT_FILENO, TIOCGWINSZ, &win_curr);
+        if (TUI_shrinkToFit)
+        {
+            int knobs_fixed_width = 2+(knob_width+1)*8+1;
+            if (knobs_fixed_width < win_curr.ws_col) win_curr.ws_col = knobs_fixed_width;
+        }
+        if (win_prev.ws_col != win_curr.ws_col || win_prev.ws_row != win_curr.ws_row)
         {
             redraw = true;
-            closeBtn.row = 0;
-            closeBtn.col = w.ws_col-3;
-            sprintf(msg, "[%d, %d]", w.ws_row, w.ws_col);
+            canvas.row = win_curr.ws_row;
+            canvas.col = win_curr.ws_col;
+            posBtnClose.row = 0;
+            posBtnClose.col = canvas.col-3;
+            posBtnMaximize.row = 0;
+            posBtnMaximize.col = canvas.col-5;
+            if (!TUI_shrinkToFit) sprintf(msg, "[%d, %d]", canvas.row, canvas.col);
         }
-        w_prev.ws_col = w.ws_col;
-        w_prev.ws_row = w.ws_row;
+        win_prev.ws_col = win_curr.ws_col;
+        win_prev.ws_row = win_curr.ws_row;
 
         // if (popup) redraw = true;
 
@@ -337,84 +205,94 @@ void tui()
         {
             redraw = false;
 
-            knobs_position(w.ws_row, w.ws_col, 1, knobs, N_KNOBS);
-            knobs_position(w.ws_row, w.ws_col, 1+w.ws_row/2, gauge, N_KNOBS);
+            knobs_position(canvas.row, canvas.col, 2, knob_width, knobs, N_DUMMY_KNOBS);
+            // knobs_position(canvas.row, canvas.col, 1+canvas.row/2, gauge, N_KNOBS);
 
-            position_cursor(w.ws_row-2, w.ws_col-2);
+            if (TUI_shrinkToFit)
+            {
+                canvas.row = knobs[N_DUMMY_KNOBS-1].r + 3;
+            }
+
+            position_cursor(canvas.row-2, canvas.col-2);
             say(
                 CSI "2J"  // Clear screen
                 CSI "H"   // Cursor top left
             );
 
-            if (inFocus)
+            if (TUI_inFocus)
             {
                 // Draw outer frame
                 position_cursor(0, 0);
                 printf("┌");
-                for (i = 0; i < w.ws_col-2; i++) printf("─");
+                for (i = 0; i < canvas.col-2; i++) printf("─");
                 printf("┐");
-                for (i = 1; i < w.ws_row-1; i++)
+                for (i = 1; i < canvas.row-1; i++)
                 {
                     position_cursor(i, 0); printf("│");
-                    position_cursor(i, w.ws_col); printf("│");
+                    position_cursor(i, canvas.col-1); printf("│");
                 }
-                position_cursor(w.ws_row, 0);
+                position_cursor(canvas.row-1, 0);
                 printf("└");
-                for (i = 0; i < w.ws_col-2; i++) printf("─");
+                for (i = 0; i < canvas.col-2; i++) printf("─");
                 printf("┘");
 
-                // Add close button
-                position_cursor(closeBtn.row, closeBtn.col);
-                printf(CSI "7m" "╳" CSI "0m");
+                // Add top buttons
+                position_cursor(posBtnClose.row, posBtnClose.col);
+                printf(CSI "0m" "☒" CSI "0m");
+                position_cursor(posBtnMaximize.row, posBtnMaximize.col);
+                printf(CSI "0m" "☐" CSI "0m");
 
                 // Print title
                 position_cursor(0, 2);
                 printf("%s", TITLE);
 
                 // // Divider
-                // position_cursor(w.ws_row / 2, 0);
+                // position_cursor(canvas.row / 2, 0);
                 // printf("├");
-                // for (i = 0; i < w.ws_col-2; i++) printf("─");
+                // for (i = 0; i < canvas.col-2; i++) printf("─");
                 // printf("┤");
-                // position_cursor(w.ws_row / 2, 2);
+                // position_cursor(canvas.row / 2, 2);
                 // printf("{divider text}");
 
                 // Print help
-                position_cursor(w.ws_row-1, 2);
-                for (i = 0; i < sizeof(help) / sizeof(*help); i++)
+                if (!TUI_shrinkToFit)
                 {
-                    // printf(" ");
-                    printf("%s", help[i].desc);
-                    // printf(" ");
-                    // printf("[%s]", help[i].key);
-                    // printf(" ");
-                    printf(CSI "C"); // Cursor forward
+                    position_cursor(canvas.row-1, 2);
+                    for (i = 0; i < sizeof(help) / sizeof(*help); i++)
+                    {
+                        // printf(" ");
+                        printf("%s", help[i].desc);
+                        // printf(" ");
+                        // printf("[%s]", help[i].key);
+                        // printf(" ");
+                        printf(CSI "C"); // Cursor forward
+                    }
                 }
             }
 
             // Print knobs
-            for (i = 0; i < N_KNOBS; i++)
+            for (i = 0; i < N_DUMMY_KNOBS; i++)
             {
                 knob_t * k_p = &knobs[i];
                 position_cursor(k_p->r, k_p->c);
-                if (i == knob_sel && inFocus) printf(CSI "7m");
-                printf("%*d", k_p->width, knob_update(k_p));
+                if (i == knob_sel && TUI_inFocus) printf(CSI "7m");
+                printf("%*d", knob_width, knob_update(k_p));
                 position_cursor(k_p->r+1, k_p->c);
-                printf(CSI "0;2m" "%*s" CSI "0m", k_p->width, k_p->desc);
+                printf(CSI "0;2m" "%*s" CSI "0m", knob_width, k_p->desc);
             }
         }
 
-        // Print gauges
-        for (i = 0; i < N_KNOBS; i++)
-        {
-            knob_t * g_p = &gauge[i];
-            position_cursor(g_p->r, g_p->c);
-            printf("%*d", g_p->width, knob_update(g_p));
-            position_cursor(g_p->r+1, g_p->c);
-            printf(CSI "0;2m" "%*s" CSI "0m", g_p->width, g_p->desc);
-        }
-        fflush(stdout);
-        usleep(10*1000);
+        // // Print gauges
+        // for (i = 0; i < N_KNOBS; i++)
+        // {
+        //     knob_t * g_p = &gauge[i];
+        //     position_cursor(g_p->r, g_p->c);
+        //     printf("%*d", g_p->width, knob_update(g_p));
+        //     position_cursor(g_p->r+1, g_p->c);
+        //     printf(CSI "0;2m" "%*s" CSI "0m", g_p->width, g_p->desc);
+        // }
+        // fflush(stdout);
+        // usleep(10*1000);
 
         if (popup)
         {
@@ -423,26 +301,27 @@ void tui()
             size_t len = 0;
             ssize_t n;
             ssize_t rows, cols;
-            const char * path = "popup.txt";
-            file_dimensions(path, &rows, &cols);
+
+            popup = false;
+            file_dimensions(popup_path, &rows, &cols);
 
             // Check boundaries
-            if (!(rows <= (w.ws_row-4) && cols <= (w.ws_col-4)))
+            if (!(rows <= (win_curr.ws_row-3) && cols <= (win_curr.ws_col-3)))
             {
-                printf(CSI "H" "Terminal window too small");
-                keepRunning = false;
+                sprintf(msg, "Terminal window too small for popup");
+                // TUI_keepRunning = false;
             }
             else
             {
-                r = (w.ws_row/2) - (rows/2) - 2;
-                c = (w.ws_col/2) - (cols/2) - 2;
+                r = (win_curr.ws_row/2) - (rows/2) - 2;
+                c = (win_curr.ws_col/2) - (cols/2) - 2;
                 position_cursor(r, c);
                 printf("┌");
                 for (i = 0; i < cols+2-2; i++) printf("─");
                 printf("┐");
 
 
-                fp = fopen(path, "r");
+                fp = fopen(popup_path, "r");
                 if (fp == NULL)
                 {
                     exit(EXIT_FAILURE);
@@ -464,33 +343,49 @@ void tui()
                 printf("┘");
                 if (line) free(line);
             }
+
+            fflush(stdout);
+            // while (get_keypress_from_queue()) { /* Flush residual keypresses */ }
+            while (!get_keypress_from_queue()) { /* Wait for keypress */ }
         }
-        
-        // Flush terminal buffer
+
         fflush(stdout);
 
-        if (keepRunning && get_keypress_from_queue())
+        if (prompt)
         {
-            if (popup)
-            {
-                popup = false;
-                redraw = true;
-            }
+            prompt = false;
+            redraw = true;
+            fflush(stdout);
+            cleanup();
+            printf("...\r\n");
+            system("neofetch > log.txt");
+            printFile("log.txt");
+            printf("Press enter to continue");
+            fflush(stdout);
+            while (!get_keypress_from_queue()) usleep(10*1000);
+            setup();
+        }
+
+        if (TUI_keepRunning && get_keypress_from_queue())
+        {
             knob_t * k_p = &knobs[knob_sel];
             if (kbd->kp == KP_CHAR)
             {
                 switch (tolower(kbd->c))
                 {
-                    case 'x': keepRunning = false; break;
+                    case 'x': TUI_keepRunning = false; break;
                     case 'a':
                         knob_sel -= 1;
-                        if (knob_sel < 0) knob_sel += N_KNOBS;
+                        if (knob_sel < 0) knob_sel += N_DUMMY_KNOBS;
                         redraw = true;
                         break;
                     case 'd':
                         knob_sel += 1;
-                        knob_sel %= N_KNOBS;
+                        knob_sel %= N_DUMMY_KNOBS;
                         redraw = true;
+                        break;
+                    case 'p':
+                        prompt = true;
                         break;
                 }
             }
@@ -506,52 +401,56 @@ void tui()
             }
             else if (kbd->kp == KP_FOCUS)
             {
-                inFocus = (kbd->c == 'I');
-                // sprintf(msg, "Focus changed to %s", inFocus?"in":"out");
+                TUI_inFocus = (kbd->c == 'I');
+                // sprintf(msg, "Focus changed to %s", TUI_inFocus?"in":"out");
                 redraw = true;
             }
             else if (kbd->kp == KP_CLICK)
             {
-                position_cursor(termpos.row, termpos.col);
-                if (termpos.row == closeBtn.row && termpos.col == closeBtn.col)
-                    keepRunning = false;
-                printf("✗");
+                position_cursor(posMouse.row, posMouse.col);
+                if (posMouse.row == posBtnClose.row && posMouse.col == posBtnClose.col)
+                    TUI_keepRunning = false;
+                else if (posMouse.row == posBtnMaximize.row && posMouse.col == posBtnMaximize.col)
+                    TUI_shrinkToFit = !TUI_shrinkToFit;
+                else
+                    printf("✗");
             }
             else if (kbd->kp != KP_IGNORE)
             {
                 sprintf(msg, "Unknown option %c [%d:%d]", kbd->c, kbd->kp, kbd->c);
             }
-            
-        }
-        else
-        {
-            usleep(10*1000);
         }
 
         fflush(stdout);
 
-        if (keepRunning && *msg != 0)
+        if (TUI_keepRunning && *msg != 0)
         {
-            int temp_col = w.ws_col/2 - strlen(msg)/2;
+            int temp_col = canvas.col/2 - strlen(msg)/2;
             if (0 <= temp_col)
             {
-                position_cursor(w.ws_row / 2, temp_col);
+                position_cursor(canvas.row / 2, temp_col);
                 printf(CSI "41m" "%s" CSI "0m", msg);
                 memset(&msg, 0, sizeof(msg) / sizeof(*msg));
-                // fflush(stdout);
-                usleep(500*1000);
+                fflush(stdout);
+                // usleep(500*1000);
                 redraw = true;
             }
-            else
-            {
-                keepRunning = false;
-                sprintf(exitReason, "Terminal window too narrow");
-            }
+            // else
+            // {
+            //     TUI_keepRunning = false;
+            //     sprintf(exitReason, "Terminal window too narrow");
+            // }
         }
+
+        if (!redraw) usleep(10*1000);
     }
 }
 
 int main(int argc, char *argv[]) {
+    // Register signal interrupt handler
+    signal(SIGINT, intHandler);
+    TUI_keepRunning = true;
+    
     setup();
     tui();
     // pthread_join(thread, NULL);

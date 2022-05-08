@@ -25,4 +25,11 @@ struct termios termios_keep;
     tcsetattr(STDIN_FILENO, TCSANOW, &raw); \
 }
 
+struct termpos {
+    unsigned char row;
+    unsigned char col;
+};
+
+#define position_cursor(r, c) printf(CSI "%d;%dH", r+1, c+1)
+
 #endif // TERMINAL_H
