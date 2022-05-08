@@ -7,11 +7,14 @@ TARGET = c-tui
 SRC = $(wildcard *.c)
 OBJ = $(SRC:*.c=*.o)
 
-.PHONY: all run clean
+.PHONY: all run clean dir-% test-%
 
-all: $(TARGET)
+all: $(TARGET) dir-tests
 
-*.o: *.c
+dir-%:
+	$(MAKE) -C $*
+
+%.o: %.c
 	$(CC) -c -o $@ $^ $(CFLAGS)
 
 $(TARGET): $(OBJ)
@@ -22,3 +25,7 @@ run: $(TARGET)
 
 clean:
 	rm -rf *.o $(TARGET)
+	$(MAKE) -C tests clean
+
+test-%:
+	$(MAKE) -C tests $@

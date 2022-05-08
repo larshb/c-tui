@@ -10,7 +10,7 @@ EXE = $(SRC:%.c=%)
 all: $(EXE)
 
 clean:
-	rm $(EXE)
+	rm -f $(EXE)
 
 test-%: %
 	./$<

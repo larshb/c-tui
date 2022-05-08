@@ -9,6 +9,13 @@
 #include "ansi.h"
 #include "terminal.h"
 
+struct termpos {
+    unsigned char row;
+    unsigned char col;
+};
+struct termpos termpos;
+struct termpos closeBtn;
+
 static volatile bool inFocus = true;
 static volatile bool keepRunning = true;
 
@@ -37,12 +44,6 @@ enum kp_arrow {
 };
 
 char * kp_arrow[] = {"UP", "DOWN", "RIGHT", "LEFT"};
-
-struct termpos {
-    unsigned char row;
-    unsigned char col;
-};
-struct termpos termpos;
 
 int get_keypress(enum keypress * kp, char * cp)
 {
@@ -323,6 +324,8 @@ void tui()
         if (w_prev.ws_col != w.ws_col || w_prev.ws_row != w.ws_row)
         {
             redraw = true;
+            closeBtn.row = 0;
+            closeBtn.col = w.ws_col-3;
             sprintf(msg, "[%d, %d]", w.ws_row, w.ws_col);
         }
         w_prev.ws_col = w.ws_col;
@@ -359,6 +362,10 @@ void tui()
                 printf("└");
                 for (i = 0; i < w.ws_col-2; i++) printf("─");
                 printf("┘");
+
+                // Add close button
+                position_cursor(closeBtn.row, closeBtn.col);
+                printf(CSI "7m" "╳" CSI "0m");
 
                 // Print title
                 position_cursor(0, 2);
@@ -510,14 +517,15 @@ void tui()
             else if (kbd->kp == KP_FOCUS)
             {
                 inFocus = (kbd->c == 'I');
-                sprintf(msg, "Focus changed to %s", inFocus?"in":"out");
+                // sprintf(msg, "Focus changed to %s", inFocus?"in":"out");
                 redraw = true;
             }
             else if (kbd->kp == KP_CLICK)
             {
                 position_cursor(termpos.row, termpos.col);
+                if (termpos.row == closeBtn.row && termpos.col == closeBtn.col)
+                    keepRunning = false;
                 printf("✗");
-                fflush(stdout);
             }
             else if (kbd->kp != KP_IGNORE)
             {
@@ -529,7 +537,10 @@ void tui()
         {
             usleep(10*1000);
         }
-        if (*msg != 0)
+
+        fflush(stdout);
+
+        if (keepRunning && *msg != 0)
         {
             int temp_col = w.ws_col/2 - strlen(msg)/2;
             if (0 <= temp_col)
